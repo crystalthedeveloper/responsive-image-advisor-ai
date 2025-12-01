@@ -1,0 +1,18 @@
+{
+  "name": "Responsive Image Advisor AI",
+  "slug": "responsive-image-advisor-ai",
+  "version": "1.0.0",
+  "description": "Reads the selected element in Webflow Designer and recommends the optimal responsive image upload size.",
+  "author": "Responsive Image Advisor",
+  "panels": [
+    {
+      "id": "responsive-image-advisor-ai-panel",
+      "label": "Responsive Image Advisor AI",
+      "entry": "index.html",
+      "initialSize": {
+        "width": 360,
+        "height": 560
+      }
+    }
+  ]
+}
