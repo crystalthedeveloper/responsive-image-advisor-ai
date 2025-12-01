@@ -1,0 +1,8 @@
+{
+  "name": "responsive-image-advisor-ai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "bundle": "npx webflow extension bundle"
+  }
+}
