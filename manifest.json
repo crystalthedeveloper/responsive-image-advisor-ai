@@ -3,17 +3,12 @@
   "version": "1.0.0",
   "engine": "0.2.0",
   "client_id": "bc60381ae1252143a2fd02e198f23987fe31b6ab91c4a04f97f744425881ee073",
-  "extensions": [
-    {
-      "type": "designer",
-      "name": "Responsive Image Advisor AI",
-      "slug": "responsive-image-advisor-ai",
-      "src": "index.html",
-      "permissions": {
-        "designer": {
-          "allowed": ["selection"]
-        }
-      }
+  "permissions": {
+    "designer": ["selection"]
+  },
+  "features": {
+    "designer": {
+      "src": "index.html"
     }
-  ]
+  }
 }
