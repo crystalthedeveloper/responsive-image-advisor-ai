@@ -8,8 +8,12 @@
       "type": "designer",
       "name": "Responsive Image Advisor AI",
       "slug": "responsive-image-advisor-ai",
-      "entry": "index.html",
-      "base_url": "https://692ddc1b7c283b5d6f210b57.webflow-ext.com"
+      "src": "index.html",
+      "permissions": {
+        "designer": {
+          "allowed": ["selection"]
+        }
+      }
     }
   ]
 }

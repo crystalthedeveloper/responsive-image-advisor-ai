@@ -8,7 +8,7 @@
     {
       "id": "responsive-image-advisor-ai-panel",
       "label": "Responsive Image Advisor AI",
-      "entry": "index.html",
+      "src": "index.html",
       "initialSize": {
         "width": 360,
         "height": 560
