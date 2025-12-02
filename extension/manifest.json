@@ -4,6 +4,11 @@
   "version": "1.0.0",
   "description": "Reads the selected element in Webflow Designer and recommends the optimal responsive image upload size.",
   "author": "Responsive Image Advisor",
+  "permissions": {
+    "designer": {
+      "allowed": ["selection"]
+    }
+  },
   "panels": [
     {
       "id": "responsive-image-advisor-ai-panel",
