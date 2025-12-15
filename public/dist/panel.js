@@ -3,6 +3,64 @@ const SELECTION_MESSAGE_TYPE = 'element-selected';
 const SUBSCRIBE_MESSAGE_TYPE = 'riaa:selection:subscribe';
 const REQUEST_MESSAGE_TYPE = 'riaa:selection:request';
 const CONTEXT_READY_MESSAGE_TYPE = 'riaa:context-ready';
+const PANEL_DIMENSIONS = { width: 520, height: 720 };
+const RUNTIME_RETRY_DELAY = 300;
+const RUNTIME_MAX_ATTEMPTS = 40;
+
+function getRuntimeCandidate() {
+  if (typeof window === 'undefined') return null;
+  return window.webflow || window.Webflow || null;
+}
+
+function attemptPanelResize(size) {
+  const runtime = getRuntimeCandidate();
+  if (!runtime || typeof runtime.setExtensionSize !== 'function') return false;
+  try {
+    const result = runtime.setExtensionSize(size);
+    if (result && typeof result.then === 'function') {
+      result.catch((error) => console.warn('Unable to resize extension panel via runtime.', error));
+    }
+    return true;
+  } catch (error) {
+    console.warn('Unable to resize extension panel via runtime.', error);
+    return false;
+  }
+}
+
+function enforceFrameSize(size) {
+  const frame = window.frameElement;
+  if (!frame || !size?.width || !size?.height) return;
+  const pxWidth = `${size.width}px`;
+  const pxHeight = `${size.height}px`;
+  [frame, frame.parentElement].forEach((node) => {
+    if (!node) return;
+    node.style.setProperty('width', pxWidth, 'important');
+    node.style.setProperty('height', pxHeight, 'important');
+    node.style.setProperty('max-width', pxWidth, 'important');
+    node.style.setProperty('max-height', pxHeight, 'important');
+    node.style.setProperty('min-width', pxWidth, 'important');
+    node.style.setProperty('min-height', pxHeight, 'important');
+  });
+}
+
+function ensureOverlayResize() {
+  const size = PANEL_DIMENSIONS;
+  enforceFrameSize(size);
+  let attempts = 0;
+  const tryResize = () => {
+    attempts += 1;
+    const succeeded = attemptPanelResize(size);
+    enforceFrameSize(size);
+    if (succeeded || attempts >= RUNTIME_MAX_ATTEMPTS) {
+      window.clearInterval(timer);
+    }
+  };
+  const timer = window.setInterval(tryResize, RUNTIME_RETRY_DELAY);
+  tryResize();
+}
+
+ensureOverlayResize();
+
 const ui = {
   analyzeButton: document.getElementById('analyze-button'),
   refreshButton: document.getElementById('refresh-selection'),
