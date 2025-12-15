@@ -1,8 +1,0 @@
-{
-  "name": "responsive-image-advisor-ai",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "bundle": "rm -f extension.zip && zip -j extension.zip extension/index.html extension/script.js extension/manifest.json"
-  }
-}

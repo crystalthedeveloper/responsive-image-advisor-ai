@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Responsive Image Advisor AI</title>
+    <link rel="stylesheet" href="./dist/panel.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <h1>Responsive Image Advisor AI</h1>
+        <p>Analyze the currently selected element to get AI-backed responsive image upload guidance.</p>
+      </header>
+
+      <section class="card">
+        <div class="inline">
+          <div>
+            <strong>Selected element</strong>
+            <div id="selected-element-text" class="small">Waiting for Designer...</div>
+          </div>
+          <button id="refresh-selection" title="Refresh selected element" style="max-width: 120px">Refresh</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Selection details</h2>
+        <p class="small">Live payload received from Webflow. Useful when debugging what the Designer is sending.</p>
+        <pre id="selection-debug" class="debug-block">No selection received yet.</pre>
+      </section>
+
+      <section class="card">
+        <h2>How it works</h2>
+        <p class="small">
+          When you analyze, we read the element's rendered width at each breakpoint, send them to the AI backend,
+          and return the most efficient upload size.
+        </p>
+        <button id="analyze-button">Analyze selection</button>
+        <div id="status-message" class="status small" role="status"></div>
+      </section>
+
+      <section id="results-card" class="card hidden">
+        <h2>AI recommendations</h2>
+        <div class="results-grid">
+          <div class="result-tile">
+            <div class="result-label">Universal Upload Size</div>
+            <div id="universal-size" class="result-value">--</div>
+          </div>
+          <div class="result-tile">
+            <div class="result-label">Desktop Render Size</div>
+            <div id="desktop-size" class="result-value">--</div>
+          </div>
+          <div class="result-tile">
+            <div class="result-label">Mobile Render Size</div>
+            <div id="mobile-size" class="result-value">--</div>
+          </div>
+        </div>
+        <p id="analysis-explanation" class="explanation"></p>
+      </section>
+    </main>
+    <script type="module" src="./dist/panel.js"></script>
+  </body>
+</html>
