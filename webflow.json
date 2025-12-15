@@ -5,14 +5,18 @@
   "serve": {
     "entry": "sidebar.html",
     "port": 1337,
-    "open": false
+    "open": false,
+    "size": {
+      "width": 800,
+      "height": 600
+    }
   },
   "bundle": {
     "entry": "sidebar.html",
     "assets": [
       "sidebar.html",
-      "dist/panel.js",
-      "dist/panel.css",
+      "panel.js",
+      "panel.css",
       "webflow-app.js",
       "manifest.json"
     ]

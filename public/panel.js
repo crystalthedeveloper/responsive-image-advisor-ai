@@ -3,63 +3,115 @@ const SELECTION_MESSAGE_TYPE = 'element-selected';
 const SUBSCRIBE_MESSAGE_TYPE = 'riaa:selection:subscribe';
 const REQUEST_MESSAGE_TYPE = 'riaa:selection:request';
 const CONTEXT_READY_MESSAGE_TYPE = 'riaa:context-ready';
-const PANEL_DIMENSIONS = { width: 520, height: 720 };
+const PANEL_WIDTH = 520;
+const PANEL_HEIGHT = 720;
 const RUNTIME_RETRY_DELAY = 300;
 const RUNTIME_MAX_ATTEMPTS = 40;
+const RUNTIME_TIMEOUT_MS = 15000;
 
-function getRuntimeCandidate() {
-  if (typeof window === 'undefined') return null;
-  return window.webflow || window.Webflow || null;
-}
+const getRuntimeCandidate = () => window.webflow || window.Webflow || null;
 
-function attemptPanelResize(size) {
-  const runtime = getRuntimeCandidate();
-  if (!runtime || typeof runtime.setExtensionSize !== 'function') return false;
-  try {
-    const result = runtime.setExtensionSize(size);
-    if (result && typeof result.then === 'function') {
-      result.catch((error) => console.warn('Unable to resize extension panel via runtime.', error));
+let runtimePromise = null;
+const getRuntimeApi = () => {
+  if (runtimePromise) return runtimePromise;
+
+  runtimePromise = new Promise((resolve, reject) => {
+    const immediate = getRuntimeCandidate();
+    if (immediate) {
+      resolve(immediate);
+      return;
     }
-    return true;
-  } catch (error) {
-    console.warn('Unable to resize extension panel via runtime.', error);
-    return false;
-  }
-}
 
-function enforceFrameSize(size) {
-  const frame = window.frameElement;
-  if (!frame || !size?.width || !size?.height) return;
-  const pxWidth = `${size.width}px`;
-  const pxHeight = `${size.height}px`;
-  [frame, frame.parentElement].forEach((node) => {
-    if (!node) return;
-    node.style.setProperty('width', pxWidth, 'important');
-    node.style.setProperty('height', pxHeight, 'important');
-    node.style.setProperty('max-width', pxWidth, 'important');
-    node.style.setProperty('max-height', pxHeight, 'important');
-    node.style.setProperty('min-width', pxWidth, 'important');
-    node.style.setProperty('min-height', pxHeight, 'important');
+    let attempts = 0;
+    const startTime = Date.now();
+    const timer = window.setInterval(() => {
+      const candidate = getRuntimeCandidate();
+      if (candidate) {
+        window.clearInterval(timer);
+        resolve(candidate);
+        return;
+      }
+
+      attempts += 1;
+      if (attempts >= RUNTIME_MAX_ATTEMPTS || Date.now() - startTime > RUNTIME_TIMEOUT_MS) {
+        window.clearInterval(timer);
+        reject(new Error('Designer runtime unavailable'));
+      }
+    }, RUNTIME_RETRY_DELAY);
   });
-}
 
-function ensureOverlayResize() {
-  const size = PANEL_DIMENSIONS;
-  enforceFrameSize(size);
-  let attempts = 0;
-  const tryResize = () => {
-    attempts += 1;
-    const succeeded = attemptPanelResize(size);
-    enforceFrameSize(size);
-    if (succeeded || attempts >= RUNTIME_MAX_ATTEMPTS) {
-      window.clearInterval(timer);
+  return runtimePromise;
+};
+
+const applyFrameSizeStyles = (node, widthPx, heightPx) => {
+  if (!node) return;
+  node.style.width = widthPx;
+  node.style.height = heightPx;
+  node.style.minWidth = widthPx;
+  node.style.minHeight = heightPx;
+};
+
+const enforceFrameSize = (size) => {
+  const frame = window.frameElement;
+  const widthPx = `${size.width}px`;
+  const heightPx = `${size.height}px`;
+  applyFrameSizeStyles(frame, widthPx, heightPx);
+  applyFrameSizeStyles(frame?.parentElement, widthPx, heightPx);
+};
+
+const requestPanelSize = (api, size) => {
+  try {
+    if (typeof api.setExtensionSize === 'function') {
+      const result = api.setExtensionSize(size);
+      if (result && typeof result.then === 'function') {
+        result.catch(() => {});
+      }
+      enforceFrameSize(size);
+      return true;
     }
-  };
-  const timer = window.setInterval(tryResize, RUNTIME_RETRY_DELAY);
-  tryResize();
-}
+    if (typeof api.resize === 'function') {
+      api.resize(size);
+      enforceFrameSize(size);
+      return true;
+    }
+  } catch {
+    enforceFrameSize(size);
+  }
+  return false;
+};
 
-ensureOverlayResize();
+const ensureResize = () => {
+  if (typeof window === 'undefined') return;
+  const size = { width: PANEL_WIDTH, height: PANEL_HEIGHT };
+
+  getRuntimeApi()
+    .then((api) => {
+      if (!requestPanelSize(api, size)) {
+        enforceFrameSize(size);
+      }
+    })
+    .catch(() => enforceFrameSize(size));
+
+  let attempts = 0;
+  const timer = window.setInterval(() => {
+    attempts += 1;
+    getRuntimeApi()
+      .then((api) => {
+        if (requestPanelSize(api, size)) {
+          window.clearInterval(timer);
+        } else if (attempts >= RUNTIME_MAX_ATTEMPTS) {
+          window.clearInterval(timer);
+        }
+      })
+      .catch(() => {
+        if (attempts >= RUNTIME_MAX_ATTEMPTS) {
+          window.clearInterval(timer);
+        }
+      });
+  }, RUNTIME_RETRY_DELAY);
+};
+
+ensureResize();
 
 const ui = {
   analyzeButton: document.getElementById('analyze-button'),

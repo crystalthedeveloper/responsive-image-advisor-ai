@@ -8,6 +8,10 @@ const subscribers = new Set();
 let latestSelection = null;
 const CONTEXT_READY_EVENT = 'riaa:context-ready';
 const runtimePromise = waitForRuntime();
+const SELECTION_EVENT_NAMES = ['selectedelementchange', 'selectedelementchanged', 'selectionchange', 'selectionchanged'];
+const SELECTION_POLL_INTERVAL = 1500;
+let selectionPollTimer = null;
+let lastPolledSignature = null;
 
 function initSelectionBridge() {
   window.addEventListener('message', handlePanelMessage);
@@ -20,14 +24,9 @@ function initSelectionBridge() {
 
     const ready = typeof runtime.ready === 'function' ? runtime.ready : (cb) => cb();
     ready(() => {
-      if (typeof runtime.subscribe === 'function') {
-        runtime.subscribe('selectedelementchange', handleSelectionChange);
-      } else if (typeof runtime.on === 'function') {
-        runtime.on('selectedelementchange', handleSelectionChange);
-      } else {
-        console.warn('webflow.on is unavailable; selection updates will be limited.');
-      }
+      subscribeToSelectionEvents(runtime);
       fetchAndBroadcastSelection();
+      startSelectionPolling(runtime);
     });
   });
 }
@@ -40,6 +39,11 @@ function handleSelectionChange(payload) {
   const normalized = normalizeSelection(selectedElement);
   console.log('[RIAA] Normalized selection from event:', normalized);
   broadcastSelection(normalized);
+}
+
+function handleSelectionEvent(eventName, payload) {
+  console.log(`[RIAA] Selection event received (${eventName})`, payload);
+  handleSelectionChange(payload);
 }
 
 function postToPanel(target, selection) {
@@ -345,6 +349,61 @@ async function fetchCurrentSelection() {
 async function fetchAndBroadcastSelection() {
   const selection = await fetchCurrentSelection();
   broadcastSelection(selection);
+}
+
+function subscribeToSelectionEvents(runtime) {
+  const attach = (label, handler) => {
+    if (typeof handler !== 'function') return;
+    SELECTION_EVENT_NAMES.forEach((eventName) => {
+      try {
+        handler.call(runtime, eventName, (payload) => handleSelectionEvent(eventName, payload));
+      } catch (error) {
+        console.warn(`[RIAA] Unable to attach ${label} listener for ${eventName}`, error);
+      }
+    });
+  };
+
+  if (typeof runtime.subscribe !== 'function' && typeof runtime.on !== 'function') {
+    console.warn('[RIAA] Webflow runtime lacks subscribe/on APIs; relying on polling.');
+  }
+
+  attach('subscribe', runtime.subscribe);
+  attach('on', runtime.on);
+}
+
+function startSelectionPolling(runtime) {
+  if (selectionPollTimer || typeof runtime?.getSelectedElement !== 'function') return;
+
+  selectionPollTimer = window.setInterval(async () => {
+    try {
+      const rawSelection = await runtime.getSelectedElement();
+      const normalized = normalizeSelection(rawSelection || null);
+      const signature = serializeSelection(normalized);
+      if (signature !== lastPolledSignature) {
+        lastPolledSignature = signature;
+        broadcastSelection(normalized);
+      }
+    } catch (error) {
+      console.warn('[RIAA] Selection polling failed.', error);
+    }
+  }, SELECTION_POLL_INTERVAL);
+}
+
+function serializeSelection(selection) {
+  if (!selection) return 'null';
+  try {
+    return JSON.stringify({
+      id: selection.id ?? null,
+      elementId: selection.elementId ?? null,
+      selector: selection.selector ?? null,
+      tagName: selection.tagName ?? null,
+      widths: selection.widths ?? null,
+      computed: selection.computedWidths ?? null
+    });
+  } catch (error) {
+    console.warn('[RIAA] Unable to serialize selection.', error);
+    return String(selection?.id ?? selection?.selector ?? Math.random());
+  }
 }
 
 initSelectionBridge();
