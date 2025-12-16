@@ -1,24 +1,47 @@
 const MESSAGE_TYPE = 'element-selected';
 const SUBSCRIBE_MESSAGE = 'riaa:selection:subscribe';
 const REQUEST_MESSAGE = 'riaa:selection:request';
+const PANEL_RESIZE_MESSAGE = 'riaa:panel:resize';
+const DEV_HOST_REGEX = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0)/i;
+const DEV_ENVIRONMENT =
+  typeof window.__DEV_MODE_ === 'boolean'
+    ? window.__DEV_MODE_
+    : !window.location?.hostname || DEV_HOST_REGEX.test(window.location.hostname);
+const RUNTIME_WAIT_TIMEOUT = 5000;
 const MEDIA_SELECTOR =
   'img, picture, video, canvas, figure, svg, [data-wf-element-type="background-video"], [data-wf-element-type="video"]';
 const MEDIA_TAGS = new Set(['img', 'picture', 'video', 'canvas', 'figure', 'svg']);
 const subscribers = new Set();
-let latestSelection = null;
+let latestSelectionState = createEmptySelectionState();
 const CONTEXT_READY_EVENT = 'riaa:context-ready';
 const runtimePromise = waitForRuntime();
 const SELECTION_EVENT_NAMES = ['selectedelementchange', 'selectedelementchanged', 'selectionchange', 'selectionchanged'];
 const SELECTION_POLL_INTERVAL = 1500;
 let selectionPollTimer = null;
 let lastPolledSignature = null;
+let devMockActive = false;
+let designerScriptSupported = false;
+
+probeDesignerScriptSupport();
+if (!designerScriptSupported && DEV_ENVIRONMENT) {
+  maybeActivateDevMock('designerscript-unavailable');
+}
 
 function initSelectionBridge() {
   window.addEventListener('message', handlePanelMessage);
 
   runtimePromise.then((runtime) => {
+    if (runtime?.designerScript || runtime?.designerscript) {
+      designerScriptSupported = true;
+    }
+    if (!designerScriptSupported && DEV_ENVIRONMENT) {
+      maybeActivateDevMock('designerscript-unavailable');
+    }
     if (!runtime) {
       console.warn('Webflow APIs are unavailable in this context.');
+      if (DEV_ENVIRONMENT) {
+        maybeActivateDevMock('runtime-unavailable');
+      }
       return;
     }
 
@@ -32,13 +55,14 @@ function initSelectionBridge() {
 }
 
 function handleSelectionChange(payload) {
-  const selectedElement =
-    (payload && typeof payload === 'object' && 'selectedElement' in payload ? payload.selectedElement : payload) ||
-    null;
-  console.log('[RIAA] Webflow event fired with selection:', selectedElement);
-  const normalized = normalizeSelection(selectedElement);
-  console.log('[RIAA] Normalized selection from event:', normalized);
-  broadcastSelection(normalized);
+  const state = normalizeSelectionState(payload);
+  console.log('[RIAA] Webflow event fired with selection payload:', payload);
+  console.log('[RIAA] Normalized selection state:', state);
+  if (!state.devMock) {
+    devMockActive = false;
+    designerScriptSupported = true;
+  }
+  broadcastSelection(state);
 }
 
 function handleSelectionEvent(eventName, payload) {
@@ -46,28 +70,39 @@ function handleSelectionEvent(eventName, payload) {
   handleSelectionChange(payload);
 }
 
-function postToPanel(target, selection) {
-  console.log('[RIAA] Posting selection to panel:', selection);
+function postToPanel(target, selectionState) {
+  console.log('[RIAA] Posting selection to panel:', selectionState);
   try {
-    target.postMessage({ type: MESSAGE_TYPE, element: selection }, '*');
+    target.postMessage(
+      {
+        type: MESSAGE_TYPE,
+        selection: selectionState,
+        element: selectionState?.primary ?? null
+      },
+      '*'
+    );
   } catch (error) {
     console.warn('Unable to message extension panel window.', error);
   }
 }
 
-function broadcastSelection(selection) {
-  console.log('[RIAA] Broadcasting selection to subscribers:', selection);
-  latestSelection = selection;
+function broadcastSelection(selectionState) {
+  const payload = selectionState ?? createEmptySelectionState();
+  if (typeof payload.devMock !== 'boolean') {
+    payload.devMock = false;
+  }
+  console.log('[RIAA] Broadcasting selection to subscribers:', payload);
+  latestSelectionState = payload;
   subscribers.forEach((subscriber) => {
     try {
-      postToPanel(subscriber, selection);
+      postToPanel(subscriber, payload);
     } catch (error) {
       console.warn('Unable to notify subscriber, removing from list.', error);
       subscribers.delete(subscriber);
     }
   });
 
-  postToHostFrames(selection);
+  postToHostFrames(payload);
 }
 
 async function handlePanelMessage(event) {
@@ -76,12 +111,17 @@ async function handlePanelMessage(event) {
   if (type === CONTEXT_READY_EVENT) {
     console.log('[RIAA] Panel context ready notice received.');
     registerSubscriber(event);
-    if (latestSelection) {
-      broadcastSelection(latestSelection);
-    } else {
+    if (!latestSelectionState?.primary && !latestSelectionState?.elements?.length) {
       const selection = await fetchCurrentSelection();
       broadcastSelection(selection);
+    } else {
+      broadcastSelection(latestSelectionState);
     }
+    return;
+  }
+
+  if (type === PANEL_RESIZE_MESSAGE) {
+    handlePanelResizeRequest(event.data?.size);
     return;
   }
 
@@ -90,7 +130,9 @@ async function handlePanelMessage(event) {
   const source = registerSubscriber(event);
   if (!source) return;
 
-  const payload = latestSelection ?? (await fetchCurrentSelection());
+  const payload = latestSelectionState?.primary || latestSelectionState?.elements?.length
+    ? latestSelectionState
+    : await fetchCurrentSelection();
   console.log('[RIAA] Responding to panel with payload:', payload);
   try {
     postToPanel(source, payload ?? null);
@@ -109,9 +151,12 @@ function registerSubscriber(event) {
 
 function postToHostFrames(selection) {
   try {
-    window.parent?.postMessage({ type: MESSAGE_TYPE, element: selection }, '*');
+    window.parent?.postMessage(
+      { type: MESSAGE_TYPE, selection, element: selection?.primary ?? null },
+      '*'
+    );
     if (window.top && window.top !== window.parent) {
-      window.top.postMessage({ type: MESSAGE_TYPE, element: selection }, '*');
+      window.top.postMessage({ type: MESSAGE_TYPE, selection, element: selection?.primary ?? null }, '*');
     }
   } catch (error) {
     console.warn('Unable to broadcast selection to host frames.', error);
@@ -145,6 +190,111 @@ function normalizeSelection(selectedElement) {
     computedWidthDesktop: computedWidths.desktop,
     computedWidthMobile: computedWidths.mobile
   };
+}
+
+function normalizeSelectionState(payload) {
+  if (payload && payload.devMock) {
+    return {
+      elements: payload.elements || [],
+      primary: payload.primary || null,
+      devMock: true
+    };
+  }
+  const selectionArray = extractSelectionArray(payload);
+  if (!selectionArray.length) {
+    return createEmptySelectionState();
+  }
+
+  const normalizedElements = selectionArray
+    .map((item) => normalizeSelection(item))
+    .filter((entry) => Boolean(entry));
+  if (!normalizedElements.length) {
+    return createEmptySelectionState();
+  }
+
+  return {
+    elements: normalizedElements,
+    primary: normalizedElements[0] ?? null,
+    devMock: false
+  };
+}
+
+function extractSelectionArray(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.selectedElements)) return payload.selectedElements;
+  if (Array.isArray(payload.elements)) return payload.elements;
+  if (Array.isArray(payload.selection)) return payload.selection;
+  if (payload.selectedElement) return [payload.selectedElement];
+  if (payload.element) return [payload.element];
+  return [payload];
+}
+
+function createEmptySelectionState() {
+  return { elements: [], primary: null, devMock: false };
+}
+
+function createDevSelectionState(reason) {
+  const mockElement = {
+    id: 'riaa-dev-mock',
+    label: 'DEV Mock Image',
+    tagName: 'img',
+    selector: '.riaa-dev-mock',
+    widths: {
+      desktop: 640,
+      mobile: 320
+    },
+    computedWidths: {
+      desktop: 640,
+      mobile: 320
+    },
+    computedWidthDesktop: 640,
+    computedWidthMobile: 320,
+    devMock: true,
+    reason
+  };
+  return { elements: [mockElement], primary: mockElement, devMock: true, reason };
+}
+
+function maybeActivateDevMock(reason) {
+  if (!DEV_ENVIRONMENT) return;
+  if (devMockActive && latestSelectionState?.devMock) return;
+  devMockActive = true;
+  const payload = createDevSelectionState(reason);
+  payload.devMockReason = reason ?? null;
+  broadcastSelection(payload);
+}
+
+function probeDesignerScriptSupport() {
+  try {
+    const wf = window.Webflow;
+    if (!wf) return false;
+    if (typeof wf.require === 'function') {
+      const module = wf.require('designerscript');
+      if (module) {
+        designerScriptSupported = true;
+        return true;
+      }
+    }
+    if (Array.isArray(wf)) {
+      wf.push(() => {
+        try {
+          const runtime = window.Webflow;
+          if (typeof runtime?.require === 'function') {
+            const module = runtime.require('designerscript');
+            if (module) {
+              designerScriptSupported = true;
+            }
+          }
+        } catch (error) {
+          console.warn('Unable to detect DesignerScript via Webflow queue.', error);
+        }
+      });
+    }
+  } catch (error) {
+    console.warn('DesignerScript detection failed.', error);
+  }
+  return designerScriptSupported;
 }
 
 function resolveDomNode(selectedElement) {
@@ -311,6 +461,44 @@ function sanitizeWidths(widths) {
   return Object.keys(sanitized).length ? sanitized : null;
 }
 
+function handlePanelResizeRequest(size) {
+  const normalized = sanitizePanelSize(size);
+  if (!normalized) return;
+  runtimePromise.then((runtime) => {
+    if (!runtime) {
+      console.warn('[RIAA] Unable to resize panel; runtime unavailable.');
+      return;
+    }
+    requestExtensionPanelSize(runtime, normalized);
+  });
+}
+
+function sanitizePanelSize(size) {
+  if (!size || typeof size !== 'object') return null;
+  const width = toPositiveNumber(size.width);
+  const height = toPositiveNumber(size.height);
+  if (!width || !height) return null;
+  return { width, height };
+}
+
+function requestExtensionPanelSize(runtime, size) {
+  if (!runtime || !size) return;
+  try {
+    if (typeof runtime.setExtensionSize === 'function') {
+      const result = runtime.setExtensionSize(size);
+      if (result && typeof result.then === 'function') {
+        result.catch(() => {});
+      }
+      return;
+    }
+    if (typeof runtime.resize === 'function') {
+      runtime.resize(size);
+    }
+  } catch (error) {
+    console.warn('[RIAA] Unable to request panel resize.', error);
+  }
+}
+
 function waitForRuntime() {
   return new Promise((resolve) => {
     const immediate = getRuntime();
@@ -323,9 +511,15 @@ function waitForRuntime() {
       const runtime = getRuntime();
       if (runtime) {
         window.clearInterval(timer);
+        window.clearTimeout(timeout);
         resolve(runtime);
       }
     }, 50);
+
+    const timeout = window.setTimeout(() => {
+      window.clearInterval(timer);
+      resolve(null);
+    }, RUNTIME_WAIT_TIMEOUT);
   });
 }
 
@@ -336,13 +530,35 @@ function getRuntime() {
 async function fetchCurrentSelection() {
   try {
     const runtime = await runtimePromise;
-    if (!runtime || typeof runtime.getSelectedElement !== 'function') return null;
-    const selection = await runtime.getSelectedElement();
-    console.log('[RIAA] getSelectedElement() returned:', selection);
-    return normalizeSelection(selection || null);
+    if (!runtime) {
+      if (DEV_ENVIRONMENT) {
+        maybeActivateDevMock('runtime-missing');
+        return createDevSelectionState();
+      }
+      return createEmptySelectionState();
+    }
+    if (typeof runtime.getSelectedElements === 'function') {
+      const selectionArray = await runtime.getSelectedElements();
+      console.log('[RIAA] getSelectedElements() returned:', selectionArray);
+      return normalizeSelectionState(selectionArray || []);
+    }
+    if (typeof runtime.getSelectedElement === 'function') {
+      const selection = await runtime.getSelectedElement();
+      console.log('[RIAA] getSelectedElement() returned:', selection);
+      return normalizeSelectionState(selection ?? null);
+    }
+    if (DEV_ENVIRONMENT) {
+      maybeActivateDevMock('runtime-incomplete');
+      return createDevSelectionState();
+    }
+    return createEmptySelectionState();
   } catch (error) {
     console.warn('Unable to fetch current selection from Webflow.', error);
-    return null;
+    if (DEV_ENVIRONMENT) {
+      maybeActivateDevMock('runtime-error');
+      return createDevSelectionState();
+    }
+    return createEmptySelectionState();
   }
 }
 
@@ -372,13 +588,21 @@ function subscribeToSelectionEvents(runtime) {
 }
 
 function startSelectionPolling(runtime) {
-  if (selectionPollTimer || typeof runtime?.getSelectedElement !== 'function') return;
+  if (selectionPollTimer) return;
+  const hasElementsApi =
+    typeof runtime?.getSelectedElements === 'function' || typeof runtime?.getSelectedElement === 'function';
+  if (!hasElementsApi) return;
 
   selectionPollTimer = window.setInterval(async () => {
     try {
-      const rawSelection = await runtime.getSelectedElement();
-      const normalized = normalizeSelection(rawSelection || null);
-      const signature = serializeSelection(normalized);
+      let rawSelection = null;
+      if (typeof runtime.getSelectedElements === 'function') {
+        rawSelection = await runtime.getSelectedElements();
+      } else if (typeof runtime.getSelectedElement === 'function') {
+        rawSelection = await runtime.getSelectedElement();
+      }
+      const normalized = normalizeSelectionState(rawSelection || []);
+      const signature = serializeSelectionState(normalized);
       if (signature !== lastPolledSignature) {
         lastPolledSignature = signature;
         broadcastSelection(normalized);
@@ -389,20 +613,19 @@ function startSelectionPolling(runtime) {
   }, SELECTION_POLL_INTERVAL);
 }
 
-function serializeSelection(selection) {
-  if (!selection) return 'null';
+function serializeSelectionState(state) {
+  if (!state) return 'null';
   try {
     return JSON.stringify({
-      id: selection.id ?? null,
-      elementId: selection.elementId ?? null,
-      selector: selection.selector ?? null,
-      tagName: selection.tagName ?? null,
-      widths: selection.widths ?? null,
-      computed: selection.computedWidths ?? null
+      count: state.elements?.length ?? 0,
+      ids: (state.elements || []).map((element) => element.id ?? element.elementId ?? element.selector ?? null),
+      selector: state.primary?.selector ?? null,
+      tagName: state.primary?.tagName ?? null,
+      devMock: Boolean(state.devMock)
     });
   } catch (error) {
-    console.warn('[RIAA] Unable to serialize selection.', error);
-    return String(selection?.id ?? selection?.selector ?? Math.random());
+    console.warn('[RIAA] Unable to serialize selection state.', error);
+    return String(Math.random());
   }
 }
 

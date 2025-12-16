@@ -9,7 +9,7 @@
     ]
   },
   "designer": {
-    "entry": "sidebar.html"
+    "entry": "index.html"
   },
   "scripts": {
     "designer": "webflow-app.js"

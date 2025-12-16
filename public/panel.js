@@ -3,6 +3,12 @@ const SELECTION_MESSAGE_TYPE = 'element-selected';
 const SUBSCRIBE_MESSAGE_TYPE = 'riaa:selection:subscribe';
 const REQUEST_MESSAGE_TYPE = 'riaa:selection:request';
 const CONTEXT_READY_MESSAGE_TYPE = 'riaa:context-ready';
+const PANEL_RESIZE_MESSAGE_TYPE = 'riaa:panel:resize';
+const DEV_HOST_REGEX = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0)/i;
+const DEV_ENVIRONMENT =
+  typeof window.__DEV_MODE_ === 'boolean'
+    ? window.__DEV_MODE_
+    : !window.location?.hostname || DEV_HOST_REGEX.test(window.location.hostname);
 const PANEL_WIDTH = 520;
 const PANEL_HEIGHT = 720;
 const RUNTIME_RETRY_DELAY = 300;
@@ -83,6 +89,7 @@ const requestPanelSize = (api, size) => {
 const ensureResize = () => {
   if (typeof window === 'undefined') return;
   const size = { width: PANEL_WIDTH, height: PANEL_HEIGHT };
+  requestHostResize(size);
 
   getRuntimeApi()
     .then((api) => {
@@ -115,7 +122,6 @@ ensureResize();
 
 const ui = {
   analyzeButton: document.getElementById('analyze-button'),
-  refreshButton: document.getElementById('refresh-selection'),
   status: document.getElementById('status-message'),
   resultsCard: document.getElementById('results-card'),
   universalSize: document.getElementById('universal-size'),
@@ -123,41 +129,42 @@ const ui = {
   mobileSize: document.getElementById('mobile-size'),
   explanation: document.getElementById('analysis-explanation'),
   selectedLabel: document.getElementById('selected-element-text'),
-  selectionDebug: document.getElementById('selection-debug')
+  selectionDebug: document.getElementById('selection-debug'),
+  devBadge: document.getElementById('dev-badge')
 };
 
+let currentSelectionState = null;
 let currentSelected = null;
-let handshakeTimer = null;
-let handshakeAttempts = 0;
-let handshakeComplete = false;
-const MAX_HANDSHAKE_ATTEMPTS = 30;
+let devMockSelectionActive = false;
+let analyzeProcessing = false;
+let analyzeSelectionReady = false;
 
 initPanel();
 
 function initPanel() {
   ui.analyzeButton?.addEventListener('click', handleAnalyzeClick);
-  ui.refreshButton?.addEventListener('click', () => {
-    refreshSelectionLabel();
-    requestSelectionUpdate(false);
-  });
 
   window.addEventListener('message', handleSelectionMessage);
-  setStatus('Waiting for a selection in the Designer...');
+  setStatus('Waiting for a Designer selection...');
+  setAnalyzeProcessing(false);
+  setAnalyzeReady(false);
+  updateDevBadge();
+  if (DEV_ENVIRONMENT) {
+    showDevMockSelection('dev-init');
+  }
   requestSelectionUpdate(true);
   notifyContextReady();
-  startHandshakeRetries();
 }
 
 async function handleAnalyzeClick() {
-  toggleAnalyzeButton(true);
-  setStatus('Checking selected element...');
-
   if (!currentSelected) {
     hideResults();
-    setStatus('Select an image element in the Designer first.', 'warning');
-    toggleAnalyzeButton(false);
+    setStatus('Select an image in the Designer first.', 'warning');
     return;
   }
+
+  setAnalyzeProcessing(true);
+  setStatus('Checking selected element...');
 
   try {
     const measuredWidths = deriveMeasuredWidths(currentSelected);
@@ -186,24 +193,31 @@ async function handleAnalyzeClick() {
     hideResults();
     setStatus(error.message || 'Unable to analyze the selected element.', 'error');
   } finally {
-    toggleAnalyzeButton(false);
+    setAnalyzeProcessing(false);
   }
 }
 
 function handleSelectionMessage(event) {
-  if (event.data?.type !== SELECTION_MESSAGE_TYPE) return;
-  currentSelected = event.data.element || null;
-  handshakeComplete = true;
-  stopHandshakeRetries();
+  const message = event?.data ? event.data : event;
+  if (message?.type !== SELECTION_MESSAGE_TYPE) return;
+  const nextState = normalizeIncomingSelection(message.selection || message.element || null);
+  currentSelectionState = nextState;
+  currentSelected = nextState?.primary ?? null;
+  devMockSelectionActive = Boolean(nextState?.devMock);
+  updateDevBadge();
   updateSelectionUI();
 }
 
 function updateSelectionUI() {
-  if (!currentSelected) {
-    updateSelectedLabel('Nothing selected');
+  const hasSelection = Boolean(currentSelected);
+  const isDevMock = Boolean(currentSelectionState?.devMock);
+  setAnalyzeReady(hasSelection);
+
+  if (!hasSelection) {
+    updateSelectedLabel('Waiting for a Designer selection...');
     updateSelectionDebug(null);
     hideResults();
-    setStatus('No element selected.', 'warning');
+    setStatus('Waiting for a Designer selection...', 'info');
     return;
   }
 
@@ -212,7 +226,13 @@ function updateSelectionUI() {
 
   const measuredWidths = deriveMeasuredWidths(currentSelected);
   if (!measuredWidths) {
-    setStatus('Waiting for rendered widths from Designer...', 'warning');
+    setStatus('Waiting for rendered widths from the Designer runtime...', 'warning');
+    return;
+  }
+
+  if (isDevMock) {
+    hideResults();
+    setStatus('DEV Mock Mode Active. Click Analyze to simulate results.', 'info');
     return;
   }
 
@@ -223,24 +243,26 @@ function updateSelectionUI() {
   }
 }
 
-function refreshSelectionLabel() {
-  handshakeComplete = false;
-  startHandshakeRetries(true);
-  updateSelectionUI();
-}
-
 async function requestRecommendations(payload) {
-  const response = await fetch(ANALYZE_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
+  try {
+    const response = await fetch(ANALYZE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
 
-  if (!response.ok) {
-    throw new Error('The AI backend returned an error.');
+    if (!response.ok) {
+      throw new Error('The AI backend returned an error.');
+    }
+
+    return response.json();
+  } catch (error) {
+    if (DEV_ENVIRONMENT) {
+      console.warn('[Responsive Image Advisor AI] Falling back to mock recommendations in dev mode.', error);
+      return buildMockRecommendations(payload?.widths);
+    }
+    throw error;
   }
-
-  return response.json();
 }
 
 function renderResults(recommendations, measuredWidths) {
@@ -269,6 +291,19 @@ function hideResults() {
 
 function formatPixelValue(value) {
   return Number.isFinite(value) ? `${Math.round(value)}px` : '--';
+}
+
+function buildMockRecommendations(measuredWidths) {
+  const desktopMeasured = toFiniteNumber(measuredWidths?.desktop) ?? 640;
+  const mobileMeasured = toFiniteNumber(measuredWidths?.mobile) ?? Math.round(desktopMeasured * 0.6);
+  const universal = Math.round(Math.max(desktopMeasured, mobileMeasured) * 2);
+  return {
+    universalUploadSize: universal,
+    desktopRenderSize: desktopMeasured,
+    mobileRenderSize: mobileMeasured,
+    explanation:
+      'DEV mock response: doubled the largest measured width to simulate the AI backend while offline.'
+  };
 }
 
 function deriveMeasuredWidths(selection) {
@@ -300,6 +335,39 @@ function getWidthSource(selection) {
   return 'unknown';
 }
 
+function normalizeIncomingSelection(payload) {
+  if (!payload) return null;
+  if (Array.isArray(payload)) {
+    return {
+      elements: payload.filter(Boolean),
+      primary: payload.find(Boolean) ?? null,
+      devMock: Boolean(payload.find((item) => item?.devMock)),
+      reason: null
+    };
+  }
+  if (payload.elements && payload.primary) {
+    const elements = Array.isArray(payload.elements) ? payload.elements.filter(Boolean) : [payload.elements].filter(Boolean);
+    const primary = payload.primary ?? elements[0] ?? null;
+    return {
+      elements,
+      primary,
+      devMock: Boolean(payload.devMock || primary?.devMock),
+      reason: payload.reason ?? payload.devMockReason ?? primary?.reason ?? null
+    };
+  }
+  if (payload.element) {
+    return normalizeIncomingSelection(payload.element);
+  }
+  const element = payload.primary ?? payload;
+  if (!element) return null;
+  return {
+    elements: [element],
+    primary: element,
+    devMock: Boolean(element.devMock || payload.devMock),
+    reason: payload.reason ?? payload.devMockReason ?? element.reason ?? null
+  };
+}
+
 function toFiniteNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
   if (typeof value === 'string') {
@@ -312,19 +380,19 @@ function toFiniteNumber(value) {
 function updateSelectedLabel(metadata) {
   if (!ui.selectedLabel) return;
 
-  if (typeof metadata === 'string') {
-    ui.selectedLabel.textContent = metadata;
-    return;
-  }
+  let displayText = 'Waiting for a Designer selection...';
 
-  if (metadata && typeof metadata === 'object') {
+  if (typeof metadata === 'string') {
+    displayText = metadata;
+  } else if (metadata && typeof metadata === 'object') {
     const tag = (metadata.tagName || 'element').toLowerCase();
     const idPart = metadata.id ? `#${metadata.id}` : '';
-    ui.selectedLabel.textContent = `${tag}${idPart}`;
-    return;
+    const selectionCount = currentSelectionState?.elements?.length ?? 0;
+    const suffix = selectionCount > 1 ? ` (first of ${selectionCount} selected)` : '';
+    displayText = `${tag}${idPart}${suffix}`;
   }
 
-  ui.selectedLabel.textContent = 'Nothing selected';
+  ui.selectedLabel.textContent = displayText;
 }
 
 function updateSelectionDebug(selection) {
@@ -341,6 +409,8 @@ function updateSelectionDebug(selection) {
     label: selection.label ?? null,
     selector: selection.selector ?? null,
     widths: selection.widths ?? null,
+    devMock: Boolean(selection.devMock),
+    reason: selection.reason ?? selection.devMockReason ?? null,
     computedWidths: selection.computedWidths ?? {
       desktop: selection.computedWidthDesktop ?? null,
       mobile: selection.computedWidthMobile ?? null
@@ -366,10 +436,65 @@ function setStatus(message, tone = 'info') {
   ui.status.style.color = colors[tone] ?? colors.info;
 }
 
-function toggleAnalyzeButton(disabled) {
+function setAnalyzeReady(isReady) {
+  analyzeSelectionReady = Boolean(isReady);
+  syncAnalyzeButtonState();
+}
+
+function setAnalyzeProcessing(isProcessing) {
+  analyzeProcessing = Boolean(isProcessing);
+  syncAnalyzeButtonState();
+}
+
+function syncAnalyzeButtonState() {
   if (!ui.analyzeButton) return;
-  ui.analyzeButton.disabled = disabled;
-  ui.analyzeButton.textContent = disabled ? 'Analyzing…' : 'Analyze selection';
+  const shouldDisable = analyzeProcessing || !analyzeSelectionReady;
+  ui.analyzeButton.disabled = shouldDisable;
+  ui.analyzeButton.textContent = analyzeProcessing ? 'Analyzing…' : 'Analyze selection';
+}
+
+function updateDevBadge() {
+  if (!ui.devBadge) return;
+  if (!DEV_ENVIRONMENT) {
+    ui.devBadge.classList.add('hidden');
+    return;
+  }
+
+  const text = 'DEV Mock Mode Active';
+  ui.devBadge.textContent = text;
+  ui.devBadge.classList.remove('hidden');
+}
+
+function createDevSelectionState(reason = 'dev-mode') {
+  const mockElement = {
+    id: 'riaa-dev-mock',
+    label: 'DEV Mock Image',
+    tagName: 'img',
+    selector: '.riaa-dev-mock',
+    widths: {
+      desktop: 640,
+      mobile: 320
+    },
+    computedWidths: {
+      desktop: 640,
+      mobile: 320
+    },
+    computedWidthDesktop: 640,
+    computedWidthMobile: 320,
+    devMock: true,
+    reason
+  };
+  return { elements: [mockElement], primary: mockElement, devMock: true, reason };
+}
+
+function showDevMockSelection(reason = 'dev-mode') {
+  if (!DEV_ENVIRONMENT) return;
+  const payload = createDevSelectionState(reason);
+  handleSelectionMessage({
+    type: SELECTION_MESSAGE_TYPE,
+    selection: payload,
+    devMock: true
+  });
 }
 
 function requestSelectionUpdate(initial = false) {
@@ -395,25 +520,13 @@ function broadcastToHost(message) {
   });
 }
 
-function startHandshakeRetries(force = false) {
-  if (handshakeTimer) return;
-  if (handshakeComplete && !force) return;
-  if (force) {
-    handshakeAttempts = 0;
-  }
-  handshakeTimer = window.setInterval(() => {
-    if (handshakeComplete || handshakeAttempts >= MAX_HANDSHAKE_ATTEMPTS) {
-      stopHandshakeRetries();
-      return;
-    }
-    handshakeAttempts += 1;
-    requestSelectionUpdate(handshakeAttempts === 1);
-    notifyContextReady();
-  }, 1000);
-}
-
-function stopHandshakeRetries() {
-  if (!handshakeTimer) return;
-  window.clearInterval(handshakeTimer);
-  handshakeTimer = null;
+function requestHostResize(size) {
+  if (!size || typeof size !== 'object') return;
+  const width = Number(size.width);
+  const height = Number(size.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return;
+  broadcastToHost({
+    type: PANEL_RESIZE_MESSAGE_TYPE,
+    size: { width, height }
+  });
 }

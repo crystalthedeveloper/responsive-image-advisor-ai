@@ -47,7 +47,7 @@ body {
 
 h1 {
   font-size: clamp(1.5rem, 4vw, 2.2rem);
-  margin: 0;
+  margin-top: 0;
   letter-spacing: -0.02em;
 }
 
@@ -68,6 +68,27 @@ button {
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   width: 100%;
   font-size: 1rem;
+  margin-top: 1rem;
+}
+
+.dev-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.15);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.75rem;
+}
+
+.dev-badge.hidden {
+  display: none;
 }
 
 button:hover:not(:disabled) {
@@ -95,8 +116,17 @@ button:disabled {
 }
 
 .status {
-  font-size: 0.95rem;
-  color: #a1a1aa;
+  margin: 1rem 0rem 0rem 0rem;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .results-grid {
@@ -156,7 +186,7 @@ button:disabled {
 }
 
 .debug-block {
-  margin-top: 1rem;
+  margin: 1rem 0rem 0rem 0rem;
   padding: 1rem;
   border-radius: 0.75rem;
   border: 1px solid rgba(255, 255, 255, 0.1);

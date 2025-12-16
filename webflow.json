@@ -1,24 +1,14 @@
 {
   "name": "responsive-image-advisor-ai",
   "publicDir": "public",
-  "src": "sidebar.html",
+  "src": "index.html",
   "serve": {
-    "entry": "sidebar.html",
+    "entry": "index.html",
     "port": 1337,
-    "open": false,
-    "size": {
-      "width": 800,
-      "height": 600
-    }
+    "open": false
   },
   "bundle": {
-    "entry": "sidebar.html",
-    "assets": [
-      "sidebar.html",
-      "panel.js",
-      "panel.css",
-      "webflow-app.js",
-      "manifest.json"
-    ]
+    "entry": "index.html",
+    "assets": ["index.html", "panel.js", "panel.css", "webflow-app.js", "manifest.json"]
   }
 }
