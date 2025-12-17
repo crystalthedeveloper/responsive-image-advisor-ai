@@ -1,0 +1,20 @@
+<svg width="96" height="96" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="dark-panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1d1f3b" />
+      <stop offset="100%" stop-color="#503f8c" />
+    </linearGradient>
+    <linearGradient id="accent-bar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#d946ef" />
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="84" height="84" rx="18" fill="url(#dark-panel)" />
+  <rect x="22" y="26" width="52" height="8" rx="4" fill="#a5b4fc" opacity="0.6" />
+  <rect x="16" y="42" width="64" height="18" rx="6" fill="#0f172a" stroke="url(#accent-bar)" stroke-width="2" />
+  <path
+    d="M36 45l-8 14h4l1.4-2.6h6.8L41.6 59H46L38 45h-2zm0.4 7.4h-4.4l2.2-4.1 2.2 4.1z"
+    fill="#e0e7ff"
+  />
+  <rect x="24" y="68" width="48" height="8" rx="4" fill="url(#accent-bar)" />
+</svg>

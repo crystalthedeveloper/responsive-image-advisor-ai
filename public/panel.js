@@ -9,11 +9,29 @@ const DEV_ENVIRONMENT =
   typeof window.__DEV_MODE_ === 'boolean'
     ? window.__DEV_MODE_
     : !window.location?.hostname || DEV_HOST_REGEX.test(window.location.hostname);
+const WEBFLOW_DOMAIN_SUFFIX = '.webflow.com';
+const KNOWN_WEBFLOW_ORIGINS = ['https://webflow.com', 'https://app.webflow.com'];
+const LOG_PREFIX = '[Responsive Image Advisor AI]';
 const PANEL_WIDTH = 520;
 const PANEL_HEIGHT = 720;
 const RUNTIME_RETRY_DELAY = 300;
 const RUNTIME_MAX_ATTEMPTS = 40;
 const RUNTIME_TIMEOUT_MS = 15000;
+
+let designerMessageWindow = window.parent && window.parent !== window ? window.parent : null;
+const referrerOrigin = getDesignerOriginFromReferrer();
+let trustedDesignerOrigin = referrerOrigin && isAllowedHostOrigin(referrerOrigin) ? referrerOrigin : null;
+let designerOriginConfirmed = false;
+
+const logDebug = (...args) => {
+  if (DEV_ENVIRONMENT) console.debug(LOG_PREFIX, ...args);
+};
+const logWarn = (...args) => {
+  if (DEV_ENVIRONMENT) console.warn(LOG_PREFIX, ...args);
+};
+const logError = (...args) => {
+  if (DEV_ENVIRONMENT) console.error(LOG_PREFIX, ...args);
+};
 
 const getRuntimeCandidate = () => window.webflow || window.Webflow || null;
 
@@ -49,22 +67,6 @@ const getRuntimeApi = () => {
   return runtimePromise;
 };
 
-const applyFrameSizeStyles = (node, widthPx, heightPx) => {
-  if (!node) return;
-  node.style.width = widthPx;
-  node.style.height = heightPx;
-  node.style.minWidth = widthPx;
-  node.style.minHeight = heightPx;
-};
-
-const enforceFrameSize = (size) => {
-  const frame = window.frameElement;
-  const widthPx = `${size.width}px`;
-  const heightPx = `${size.height}px`;
-  applyFrameSizeStyles(frame, widthPx, heightPx);
-  applyFrameSizeStyles(frame?.parentElement, widthPx, heightPx);
-};
-
 const requestPanelSize = (api, size) => {
   try {
     if (typeof api.setExtensionSize === 'function') {
@@ -72,16 +74,14 @@ const requestPanelSize = (api, size) => {
       if (result && typeof result.then === 'function') {
         result.catch(() => {});
       }
-      enforceFrameSize(size);
       return true;
     }
     if (typeof api.resize === 'function') {
       api.resize(size);
-      enforceFrameSize(size);
       return true;
     }
-  } catch {
-    enforceFrameSize(size);
+  } catch (error) {
+    logWarn('Designer runtime rejected resize request.', error);
   }
   return false;
 };
@@ -93,11 +93,9 @@ const ensureResize = () => {
 
   getRuntimeApi()
     .then((api) => {
-      if (!requestPanelSize(api, size)) {
-        enforceFrameSize(size);
-      }
+      requestPanelSize(api, size);
     })
-    .catch(() => enforceFrameSize(size));
+    .catch((error) => logWarn('Designer runtime unavailable during resize.', error));
 
   let attempts = 0;
   const timer = window.setInterval(() => {
@@ -110,7 +108,8 @@ const ensureResize = () => {
           window.clearInterval(timer);
         }
       })
-      .catch(() => {
+      .catch((error) => {
+        logWarn('Retrying resize until runtime responds.', error);
         if (attempts >= RUNTIME_MAX_ATTEMPTS) {
           window.clearInterval(timer);
         }
@@ -189,7 +188,7 @@ async function handleAnalyzeClick() {
     renderResults(recommendations, measuredWidths);
     setStatus('Analysis complete.');
   } catch (error) {
-    console.error('[Responsive Image Advisor AI]', error);
+    logError('Analysis failed', error);
     hideResults();
     setStatus(error.message || 'Unable to analyze the selected element.', 'error');
   } finally {
@@ -198,9 +197,20 @@ async function handleAnalyzeClick() {
 }
 
 function handleSelectionMessage(event) {
-  const message = event?.data ? event.data : event;
-  if (message?.type !== SELECTION_MESSAGE_TYPE) return;
-  const nextState = normalizeIncomingSelection(message.selection || message.element || null);
+  const isMessageEvent = event && typeof event === 'object' && 'data' in event && 'origin' in event;
+  if (isMessageEvent) {
+    if (!isTrustedDesignerMessage(event)) return;
+    const message = event.data;
+    if (message?.type !== SELECTION_MESSAGE_TYPE) return;
+    applySelectionState(message.selection || message.element || null);
+    return;
+  }
+  if (event?.type !== SELECTION_MESSAGE_TYPE) return;
+  applySelectionState(event.selection || event.element || null);
+}
+
+function applySelectionState(payload) {
+  const nextState = normalizeIncomingSelection(payload);
   currentSelectionState = nextState;
   currentSelected = nextState?.primary ?? null;
   devMockSelectionActive = Boolean(nextState?.devMock);
@@ -258,7 +268,7 @@ async function requestRecommendations(payload) {
     return response.json();
   } catch (error) {
     if (DEV_ENVIRONMENT) {
-      console.warn('[Responsive Image Advisor AI] Falling back to mock recommendations in dev mode.', error);
+      logWarn('Falling back to mock recommendations in dev mode.', error);
       return buildMockRecommendations(payload?.widths);
     }
     throw error;
@@ -507,15 +517,22 @@ function notifyContextReady() {
 }
 
 function broadcastToHost(message) {
-  const targets = new Set();
-  if (window.parent && window.parent !== window) targets.add(window.parent);
-  if (window.top && window.top !== window.parent && window.top !== window) targets.add(window.top);
-
-  targets.forEach((target) => {
+  if (!designerMessageWindow) {
+    logWarn('Unable to broadcast to designer host; target window missing.');
+    return;
+  }
+  const targetOrigins = new Set();
+  if (trustedDesignerOrigin) {
+    targetOrigins.add(trustedDesignerOrigin);
+  }
+  if (!designerOriginConfirmed) {
+    KNOWN_WEBFLOW_ORIGINS.forEach((origin) => targetOrigins.add(origin));
+  }
+  targetOrigins.forEach((origin) => {
     try {
-      target.postMessage(message, '*');
+      designerMessageWindow.postMessage(message, origin);
     } catch (error) {
-      console.warn('Unable to communicate with Designer host.', error);
+      logWarn('Unable to communicate with Designer host.', error);
     }
   });
 }
@@ -529,4 +546,45 @@ function requestHostResize(size) {
     type: PANEL_RESIZE_MESSAGE_TYPE,
     size: { width, height }
   });
+}
+
+function getDesignerOriginFromReferrer() {
+  if (!document?.referrer) return null;
+  try {
+    const refUrl = new URL(document.referrer);
+    return refUrl.origin;
+  } catch (error) {
+    logWarn('Unable to parse Designer referrer origin.', error);
+    return null;
+  }
+}
+
+function isAllowedHostOrigin(origin) {
+  if (!origin) return false;
+  if (DEV_ENVIRONMENT) return true;
+  try {
+    const url = new URL(origin);
+    return url.hostname === 'webflow.com' || url.hostname.endsWith(WEBFLOW_DOMAIN_SUFFIX);
+  } catch (error) {
+    logWarn('Invalid origin provided by Designer host.', error);
+    return false;
+  }
+}
+
+function isTrustedDesignerMessage(event) {
+  if (!event || typeof event !== 'object') return false;
+  const origin = event.origin || event.data?.origin || null;
+  if (!origin || !isAllowedHostOrigin(origin)) return false;
+  if (!designerOriginConfirmed) {
+    trustedDesignerOrigin = origin;
+    designerOriginConfirmed = true;
+  }
+  if (trustedDesignerOrigin !== origin) return false;
+  if (designerMessageWindow && event.source && event.source !== designerMessageWindow) {
+    return false;
+  }
+  if (!designerMessageWindow && event.source && typeof event.source.postMessage === 'function') {
+    designerMessageWindow = event.source;
+  }
+  return true;
 }

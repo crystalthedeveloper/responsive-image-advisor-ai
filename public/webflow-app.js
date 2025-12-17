@@ -7,11 +7,20 @@ const DEV_ENVIRONMENT =
   typeof window.__DEV_MODE_ === 'boolean'
     ? window.__DEV_MODE_
     : !window.location?.hostname || DEV_HOST_REGEX.test(window.location.hostname);
+const LOG_PREFIX = '[Responsive Image Advisor Designer]';
+const PANEL_HOST_SUFFIXES = ['website-files.com', 'webflow-ext.com'];
 const RUNTIME_WAIT_TIMEOUT = 5000;
+const logDebug = (...args) => {
+  if (DEV_ENVIRONMENT) console.debug(LOG_PREFIX, ...args);
+};
+const logWarn = (...args) => {
+  if (DEV_ENVIRONMENT) console.warn(LOG_PREFIX, ...args);
+};
 const MEDIA_SELECTOR =
   'img, picture, video, canvas, figure, svg, [data-wf-element-type="background-video"], [data-wf-element-type="video"]';
 const MEDIA_TAGS = new Set(['img', 'picture', 'video', 'canvas', 'figure', 'svg']);
 const subscribers = new Set();
+const subscriberOrigins = new WeakMap();
 let latestSelectionState = createEmptySelectionState();
 const CONTEXT_READY_EVENT = 'riaa:context-ready';
 const runtimePromise = waitForRuntime();
@@ -21,6 +30,10 @@ let selectionPollTimer = null;
 let lastPolledSignature = null;
 let devMockActive = false;
 let designerScriptSupported = false;
+const scriptOrigin = getCurrentScriptOrigin();
+let trustedPanelOrigin = scriptOrigin || null;
+let panelOriginConfirmed = Boolean(trustedPanelOrigin);
+let trustedPanelWindow = null;
 
 probeDesignerScriptSupport();
 if (!designerScriptSupported && DEV_ENVIRONMENT) {
@@ -38,7 +51,7 @@ function initSelectionBridge() {
       maybeActivateDevMock('designerscript-unavailable');
     }
     if (!runtime) {
-      console.warn('Webflow APIs are unavailable in this context.');
+      logWarn('Webflow APIs are unavailable in this context.');
       if (DEV_ENVIRONMENT) {
         maybeActivateDevMock('runtime-unavailable');
       }
@@ -56,8 +69,8 @@ function initSelectionBridge() {
 
 function handleSelectionChange(payload) {
   const state = normalizeSelectionState(payload);
-  console.log('[RIAA] Webflow event fired with selection payload:', payload);
-  console.log('[RIAA] Normalized selection state:', state);
+  logDebug('Webflow event selection payload received.', payload);
+  logDebug('Normalized selection state prepared for panel.', state);
   if (!state.devMock) {
     devMockActive = false;
     designerScriptSupported = true;
@@ -66,12 +79,14 @@ function handleSelectionChange(payload) {
 }
 
 function handleSelectionEvent(eventName, payload) {
-  console.log(`[RIAA] Selection event received (${eventName})`, payload);
+  logDebug(`Selection event received (${eventName}).`, payload);
   handleSelectionChange(payload);
 }
 
-function postToPanel(target, selectionState) {
-  console.log('[RIAA] Posting selection to panel:', selectionState);
+function postToPanel(target, selectionState, originOverride) {
+  const targetOrigin = originOverride || subscriberOrigins.get(target) || trustedPanelOrigin;
+  if (!targetOrigin) return false;
+  logDebug('Posting selection to panel.', selectionState);
   try {
     target.postMessage(
       {
@@ -79,10 +94,12 @@ function postToPanel(target, selectionState) {
         selection: selectionState,
         element: selectionState?.primary ?? null
       },
-      '*'
+      targetOrigin
     );
+    return true;
   } catch (error) {
-    console.warn('Unable to message extension panel window.', error);
+    logWarn('Unable to message extension panel window.', error);
+    return false;
   }
 }
 
@@ -91,25 +108,33 @@ function broadcastSelection(selectionState) {
   if (typeof payload.devMock !== 'boolean') {
     payload.devMock = false;
   }
-  console.log('[RIAA] Broadcasting selection to subscribers:', payload);
+  logDebug('Broadcasting selection to subscribers.', payload);
   latestSelectionState = payload;
   subscribers.forEach((subscriber) => {
     try {
-      postToPanel(subscriber, payload);
+      const origin = subscriberOrigins.get(subscriber);
+      if (!origin) {
+        subscribers.delete(subscriber);
+        return;
+      }
+      if (!postToPanel(subscriber, payload, origin)) {
+        subscribers.delete(subscriber);
+        subscriberOrigins.delete(subscriber);
+      }
     } catch (error) {
-      console.warn('Unable to notify subscriber, removing from list.', error);
+      logWarn('Unable to notify subscriber, removing from list.', error);
       subscribers.delete(subscriber);
+      subscriberOrigins.delete(subscriber);
     }
   });
-
-  postToHostFrames(payload);
 }
 
 async function handlePanelMessage(event) {
+  if (!isTrustedPanelMessage(event)) return;
   const type = event.data?.type;
-  console.log('[RIAA] Panel message received:', type, event.data);
+  logDebug('Panel message received.', type, event.data);
   if (type === CONTEXT_READY_EVENT) {
-    console.log('[RIAA] Panel context ready notice received.');
+    logDebug('Panel context ready notice received.');
     registerSubscriber(event);
     if (!latestSelectionState?.primary && !latestSelectionState?.elements?.length) {
       const selection = await fetchCurrentSelection();
@@ -133,11 +158,12 @@ async function handlePanelMessage(event) {
   const payload = latestSelectionState?.primary || latestSelectionState?.elements?.length
     ? latestSelectionState
     : await fetchCurrentSelection();
-  console.log('[RIAA] Responding to panel with payload:', payload);
+  logDebug('Responding to panel with payload.', payload);
   try {
-    postToPanel(source, payload ?? null);
+    const origin = subscriberOrigins.get(source) || event.origin || trustedPanelOrigin;
+    postToPanel(source, payload ?? null, origin);
   } catch (error) {
-    console.warn('Unable to respond to panel request.', error);
+    logWarn('Unable to respond to panel request.', error);
   }
 }
 
@@ -145,38 +171,28 @@ function registerSubscriber(event) {
   const source = event.source;
   if (!source || typeof source.postMessage !== 'function') return null;
   subscribers.add(source);
-  console.log('[RIAA] Subscriber count:', subscribers.size);
-  return source;
-}
-
-function postToHostFrames(selection) {
-  try {
-    window.parent?.postMessage(
-      { type: MESSAGE_TYPE, selection, element: selection?.primary ?? null },
-      '*'
-    );
-    if (window.top && window.top !== window.parent) {
-      window.top.postMessage({ type: MESSAGE_TYPE, selection, element: selection?.primary ?? null }, '*');
-    }
-  } catch (error) {
-    console.warn('Unable to broadcast selection to host frames.', error);
+  subscriberOrigins.set(source, event.origin || trustedPanelOrigin);
+  if (!trustedPanelWindow) {
+    trustedPanelWindow = source;
   }
+  logDebug('Subscriber registered. Total panels:', subscribers.size);
+  return source;
 }
 
 function normalizeSelection(selectedElement) {
   if (!selectedElement) {
-    console.log('[RIAA] normalizeSelection called with null selection.');
+    logDebug('normalizeSelection called with null selection.');
     return null;
   }
 
   const safeBase = createSerializableSelection(selectedElement);
   const domNode = resolveDomNode(selectedElement);
-  console.log('[RIAA] Resolved DOM node:', domNode);
+  logDebug('Resolved DOM node for selection.', domNode);
   const visualNode = findVisualMediaNode(domNode);
-  console.log('[RIAA] Visual node determined as:', visualNode);
+  logDebug('Visual node determined for selection.', visualNode);
   const measurementNode = visualNode || domNode;
   const computedWidths = computeBoundingWidths(measurementNode);
-  console.log('[RIAA] Computed widths:', computedWidths);
+  logDebug('Computed widths for selection.', computedWidths);
   const tagName = (visualNode || domNode)?.tagName?.toLowerCase() ?? safeBase.tagName ?? null;
   const id = (visualNode || domNode)?.id || safeBase.id || null;
   const selector = buildSelector(visualNode || domNode, safeBase.selector);
@@ -287,12 +303,12 @@ function probeDesignerScriptSupport() {
             }
           }
         } catch (error) {
-          console.warn('Unable to detect DesignerScript via Webflow queue.', error);
+          logWarn('Unable to detect DesignerScript via Webflow queue.', error);
         }
       });
     }
   } catch (error) {
-    console.warn('DesignerScript detection failed.', error);
+    logWarn('DesignerScript detection failed.', error);
   }
   return designerScriptSupported;
 }
@@ -318,7 +334,7 @@ function resolveDomNode(selectedElement) {
       const match = document.querySelector(selector);
       if (match) return match;
     } catch (error) {
-      console.warn('Unable to query selector from selected element.', error);
+      logWarn('Unable to query selector from selected element.', error);
     }
   }
 
@@ -359,7 +375,7 @@ function hasBackgroundImage(node) {
     const styles = window.getComputedStyle(node);
     return Boolean(styles && styles.backgroundImage && styles.backgroundImage !== 'none');
   } catch (error) {
-    console.warn('Unable to compute background styles for node.', error);
+    logWarn('Unable to compute background styles for node.', error);
     return false;
   }
 }
@@ -466,7 +482,7 @@ function handlePanelResizeRequest(size) {
   if (!normalized) return;
   runtimePromise.then((runtime) => {
     if (!runtime) {
-      console.warn('[RIAA] Unable to resize panel; runtime unavailable.');
+      logWarn('Unable to resize panel; runtime unavailable.');
       return;
     }
     requestExtensionPanelSize(runtime, normalized);
@@ -495,7 +511,7 @@ function requestExtensionPanelSize(runtime, size) {
       runtime.resize(size);
     }
   } catch (error) {
-    console.warn('[RIAA] Unable to request panel resize.', error);
+    logWarn('Unable to request panel resize.', error);
   }
 }
 
@@ -539,12 +555,12 @@ async function fetchCurrentSelection() {
     }
     if (typeof runtime.getSelectedElements === 'function') {
       const selectionArray = await runtime.getSelectedElements();
-      console.log('[RIAA] getSelectedElements() returned:', selectionArray);
+      logDebug('getSelectedElements returned.', selectionArray);
       return normalizeSelectionState(selectionArray || []);
     }
     if (typeof runtime.getSelectedElement === 'function') {
       const selection = await runtime.getSelectedElement();
-      console.log('[RIAA] getSelectedElement() returned:', selection);
+      logDebug('getSelectedElement returned.', selection);
       return normalizeSelectionState(selection ?? null);
     }
     if (DEV_ENVIRONMENT) {
@@ -553,7 +569,7 @@ async function fetchCurrentSelection() {
     }
     return createEmptySelectionState();
   } catch (error) {
-    console.warn('Unable to fetch current selection from Webflow.', error);
+    logWarn('Unable to fetch current selection from Webflow.', error);
     if (DEV_ENVIRONMENT) {
       maybeActivateDevMock('runtime-error');
       return createDevSelectionState();
@@ -574,13 +590,13 @@ function subscribeToSelectionEvents(runtime) {
       try {
         handler.call(runtime, eventName, (payload) => handleSelectionEvent(eventName, payload));
       } catch (error) {
-        console.warn(`[RIAA] Unable to attach ${label} listener for ${eventName}`, error);
+        logWarn(`Unable to attach ${label} listener for ${eventName}`, error);
       }
     });
   };
 
   if (typeof runtime.subscribe !== 'function' && typeof runtime.on !== 'function') {
-    console.warn('[RIAA] Webflow runtime lacks subscribe/on APIs; relying on polling.');
+    logWarn('Webflow runtime lacks subscribe/on APIs; relying on polling.');
   }
 
   attach('subscribe', runtime.subscribe);
@@ -608,7 +624,7 @@ function startSelectionPolling(runtime) {
         broadcastSelection(normalized);
       }
     } catch (error) {
-      console.warn('[RIAA] Selection polling failed.', error);
+      logWarn('Selection polling failed.', error);
     }
   }, SELECTION_POLL_INTERVAL);
 }
@@ -624,9 +640,56 @@ function serializeSelectionState(state) {
       devMock: Boolean(state.devMock)
     });
   } catch (error) {
-    console.warn('[RIAA] Unable to serialize selection state.', error);
+    logWarn('Unable to serialize selection state.', error);
     return String(Math.random());
   }
 }
 
 initSelectionBridge();
+
+function getCurrentScriptOrigin() {
+  try {
+    if (document.currentScript?.src) {
+      return new URL(document.currentScript.src).origin;
+    }
+    const scripts = document.getElementsByTagName('script');
+    const lastScript = scripts[scripts.length - 1];
+    if (lastScript?.src) {
+      return new URL(lastScript.src).origin;
+    }
+  } catch (error) {
+    logWarn('Unable to derive script origin.', error);
+  }
+  return null;
+}
+
+function isTrustedPanelMessage(event) {
+  if (!event || typeof event !== 'object') return false;
+  const origin = event.origin || null;
+  if (!origin || !isAllowedPanelOrigin(origin)) return false;
+  if (!panelOriginConfirmed) {
+    trustedPanelOrigin = origin;
+    panelOriginConfirmed = true;
+  }
+  if (trustedPanelOrigin && origin !== trustedPanelOrigin) return false;
+  if (!trustedPanelWindow && event.source && typeof event.source.postMessage === 'function') {
+    trustedPanelWindow = event.source;
+  }
+  if (trustedPanelWindow && event.source && event.source !== trustedPanelWindow) {
+    return false;
+  }
+  return true;
+}
+
+function isAllowedPanelOrigin(origin) {
+  if (!origin) return false;
+  if (DEV_ENVIRONMENT) return true;
+  if (scriptOrigin && origin === scriptOrigin) return true;
+  try {
+    const hostname = new URL(origin).hostname;
+    return PANEL_HOST_SUFFIXES.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+  } catch (error) {
+    logWarn('Invalid origin from panel message.', error);
+    return false;
+  }
+}

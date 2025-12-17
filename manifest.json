@@ -3,13 +3,27 @@
   "version": "1.0.0",
   "engine": "0.2.0",
   "client_id": "bc60381ae1252143a2fd02e198f23987fe31b6ab91c4a04f97f744425881ee073",
+  "icons": [
+    {
+      "src": "icons/riaa-light.svg",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "icons/riaa-dark.svg",
+      "type": "image/svg+xml"
+    }
+  ],
   "permissions": {
     "designer": [
       "selection"
     ]
   },
   "designer": {
-    "entry": "index.html"
+    "entry": "index.html",
+    "icons": {
+      "light": "icons/riaa-light.svg",
+      "dark": "icons/riaa-dark.svg"
+    }
   },
   "scripts": {
     "designer": "webflow-app.js"
